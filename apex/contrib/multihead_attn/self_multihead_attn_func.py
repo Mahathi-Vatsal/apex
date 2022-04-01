@@ -6,7 +6,7 @@ class SelfAttnFunc(torch.autograd.Function):
     def forward(ctx, use_time_mask, is_training, heads, scale, inputs,
                 input_weights, output_weights,
                 input_biases, output_biases,
-                mask, is_additive_mask, dropout_prob):
+                mask, dropout_prob):
         use_biases_t   = torch.tensor([input_biases is not None])
         heads_t        = torch.tensor([heads])
         scale_t        = torch.tensor([scale])
@@ -60,11 +60,8 @@ class SelfAttnFunc(torch.autograd.Function):
                 batches,seql_q,seql_k = matmul1_results.size()
                 seqs = int(batches / heads)
                 matmul1_results = matmul1_results.view(seqs, heads, seql_q, seql_k)
-                if is_additive_mask:
-                    matmul1_results = matmul1_results + mask.unsqueeze(1).unsqueeze(2)
-                else:
-                    mask = mask.to(torch.bool)
-                    matmul1_results = matmul1_results.masked_fill_(mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+                mask = mask.to(torch.bool)
+                matmul1_results = matmul1_results.masked_fill_(mask.unsqueeze(1).unsqueeze(2), float('-inf'))
                 matmul1_results = matmul1_results.view(seqs*heads, seql_q, seql_k)
 
         softmax_results = F.softmax(matmul1_results, dim=-1)
@@ -189,8 +186,7 @@ class SelfAttnFunc(torch.autograd.Function):
         dropout_grads = torch._masked_scale(matmul2_dgrad1, dropout_mask, 1.0/(1.0-dropout_prob_t[0]))
 
         # Softmax Grad (not a publically documented op)
-        ### softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results) # og
-        softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, torch.float32, grad_input=softmax_results)
+        softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results)
 
         # Matmul1 - DGRAD1
         # Input1: (data grads)  [seqs*heads, seql_q, seql_k] 
@@ -231,6 +227,6 @@ class SelfAttnFunc(torch.autograd.Function):
                input_grads,                              \
                input_weight_grads, output_weight_grads,  \
                input_bias_grads, output_bias_grads,      \
-               None, None, None
+               None, None
 
 self_attn_func = SelfAttnFunc.apply

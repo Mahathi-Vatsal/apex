@@ -12,7 +12,7 @@
 #include "compat.h"
 
 #if defined __HIP_PLATFORM_HCC__
-#define SHFL_DOWN(mask,val,i) __shfl_down(val, i)
+#define SHFL_DOWN __shfl_down
 #else
 #define SHFL_DOWN __shfl_down_sync
 #endif
@@ -44,11 +44,8 @@ __host__ __forceinline__ int h_last_pow2(unsigned int n) {
     return n - (n >> 1);
 }
 
-#ifdef __HIP_PLATFORM_HCC__
-#define WARP_SIZE 64
-#else
+
 #define WARP_SIZE 32
-#endif
 
 template<typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val)
@@ -64,27 +61,25 @@ __device__ __forceinline__ T reduce_block(T *x, T val)
 {
   int tid = threadIdx.y*blockDim.x + threadIdx.x;
   int blockSize = blockDim.x * blockDim.y;
-  int lane = tid % WARP_SIZE;
-  int wid = tid / WARP_SIZE;
 
-  if (blockSize > WARP_SIZE) {
+  if (blockSize > 32) {
     val = warp_reduce_sum(val);
-    if (lane == 0)
-      x[wid] = val;
+    if (tid % WARP_SIZE == 0)
+      x[tid/WARP_SIZE] = val;
 
     __syncthreads();
 
-    val = (tid < blockSize / WARP_SIZE? x[lane] : T(0));
+    val = (tid < blockSize / WARP_SIZE? x[tid%WARP_SIZE] : T(0));
   }
 
-  if(wid==0) val = warp_reduce_sum(val);
+  if(tid/WARP_SIZE==0) val = warp_reduce_sum(val);
 
   return val;
 }
 
 #define ELEMENTS_PER_ITER 4 // enables concurrency within each thread to hide latency
 #define ELEMENTS_PER_THREAD 16
-#define OPTIMAL_TILE_W WARP_SIZE
+#define OPTIMAL_TILE_W 32
 #define MAX_H_BLOCK 128
 #define MAX_BLOCK_SIZE 512
 
@@ -142,7 +137,11 @@ __device__ __forceinline__ void warp_reduce_mean_m2n(T &mean, T &m2n, int &num)
     auto num_new = SHFL_DOWN(0xffffffff, num, i);
     auto mean_new = SHFL_DOWN(0xffffffff, mean, i);
     auto m2n_new = SHFL_DOWN(0xffffffff, m2n, i);
+#if defined __HIP_PLATFORM_HCC__
+    welford_merge_element<T, int>(num, mean, m2n, num_new, mean_new, m2n_new);
+#else
     welford_merge_element(num, mean, m2n, num_new, mean_new, m2n_new);
+#endif
   }
 }
 
@@ -159,7 +158,7 @@ __device__ void welford_reduce_mean_m2n(
   int lane = thread_id % WARP_SIZE;
   int wid = thread_id / WARP_SIZE;
 
-  if (block_size > WARP_SIZE) {
+  if (block_size > 32) {
     warp_reduce_mean_m2n(mean, m2n, num);
     if (lane == 0) {
       x[wid*2] = mean;
@@ -266,9 +265,6 @@ __device__ __forceinline__ void merge_block_vertical(T& sum_dy,
 
 // welford kernel calculating mean/biased_variance/unbiased_variance
 template <typename scalar_t, typename accscalar_t, typename outscalar_t>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void welford_kernel(
       const scalar_t* __restrict__ input,
       outscalar_t* __restrict__ out_mean,
@@ -295,8 +291,8 @@ __global__ void welford_kernel(
     }
   }
 
-  static __shared__ int s_mem[WARP_SIZE];
-  static __shared__ accscalar_t s_mem_ac[WARP_SIZE*2];
+  static __shared__ int s_mem[160];
+  accscalar_t* s_mem_ac = (accscalar_t*) &s_mem[32];
 
   welford_reduce_mean_m2n<accscalar_t>(s_mem_ac, s_mem, x_mean, m_2_n, count, block_size, thread_id);
 
@@ -308,9 +304,6 @@ __global__ void welford_kernel(
 
 // elementwise BN kernel
 template <typename scalar_t, typename accscalar_t, typename layerscalar_t>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void batchnorm_forward_kernel(
       const scalar_t* __restrict__ input,
       const accscalar_t* __restrict__ mean,
@@ -338,9 +331,6 @@ __global__ void batchnorm_forward_kernel(
 // Breaking the grad_input to two step to support sync BN, which requires all
 // reduce of the intermediate results across processes.
 template <typename scalar_t, typename accscalar_t, typename layerscalar_t>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void reduce_bn_kernel(
       const scalar_t* __restrict__ input,
       const scalar_t* __restrict__ grad_output,
@@ -353,7 +343,7 @@ __global__ void reduce_bn_kernel(
       const int bs,
       const int fs,
       const int ss) {
-  static __shared__ int s_mem[WARP_SIZE];
+  static __shared__ int s_mem[64];
   //int total_item_num = bs * ss;
 
   int thread_id = threadIdx.y*blockDim.x + threadIdx.x;
@@ -405,9 +395,6 @@ __global__ void reduce_bn_kernel(
 
 // elementwise backward BN kernel
 template <typename scalar_t, typename accscalar_t, typename layerscalar_t>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void batchnorm_backward_kernel(
       const scalar_t* __restrict__ grad_output,
       const scalar_t* __restrict__ input,
@@ -447,9 +434,6 @@ template
     typename accscalar_t,
     typename outscalar_t,
     int PARALLEL_LOADS>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void
 welford_kernel_c_last(
       const scalar_t* __restrict__ input,
@@ -591,9 +575,6 @@ welford_kernel_c_last(
 // parallel welford kernel to further reduce mean / biased_var
 // into mean / unbiased_var / inv_std across multiple processes.
 template <typename scalar_t>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void welford_kernel_parallel(
       const scalar_t* __restrict__ mean,
       const scalar_t* __restrict__ var_biased,
@@ -627,9 +608,6 @@ template <
     typename accscalar_t,
     typename layerscalar_t,
     int PARALLEL_LOADS>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void batchnorm_forward_c_last_kernel(
       const scalar_t* __restrict__ input,
       const scalar_t* __restrict__ z,
@@ -680,9 +658,6 @@ template <
     typename accscalar_t,
     typename layerscalar_t,
     int PARALLEL_LOADS>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void relu_backward_c_last_kernel(
       const scalar_t* __restrict__ grad_output,
       const scalar_t* __restrict__ input,
@@ -733,9 +708,6 @@ template
     typename accscalar_t,
     typename layerscalar_t,
     int PARALLEL_LOADS>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void reduce_bn_c_last_kernel(
       const scalar_t* __restrict__ input,
       const scalar_t* __restrict__ grad_output,
@@ -889,9 +861,6 @@ template <
     typename accscalar_t,
     typename layerscalar_t,
     int PARALLEL_LOADS>
-#ifdef __HIP_PLATFORM_HCC__
-__launch_bounds__(MAX_BLOCK_SIZE)
-#endif
 __global__ void batchnorm_backward_c_last_kernel(
       const scalar_t* __restrict__ grad_output,
       const scalar_t* __restrict__ input,
@@ -952,7 +921,7 @@ std::vector<at::Tensor> welford_mean_var_CUDA(const at::Tensor input) {
   at::Tensor out_var_biased = at::empty({feature_size}, input.options().dtype(scalar_type));
   at::Tensor out_mean = at::empty({feature_size}, input.options().dtype(scalar_type));
 
-  int block_y = min(h_last_pow2(batch_size), int(MAX_BLOCK_SIZE / WARP_SIZE));
+  int block_y = min(h_last_pow2(batch_size), int(MAX_BLOCK_SIZE / 32));
   int block_x = max(1, min(MAX_BLOCK_SIZE / block_y, h_last_pow2(space_size)));
   const dim3 block(block_x, block_y);
   const dim3 grid(feature_size);
@@ -988,7 +957,7 @@ at::Tensor batchnorm_forward_CUDA(
 
   auto space_size = get_tensor_spatial_size(input);
 
-  int block_x = max(WARP_SIZE, min(MAX_BLOCK_SIZE, h_last_pow2(space_size)/4));
+  int block_x = max(32, min(MAX_BLOCK_SIZE, h_last_pow2(space_size)/4));
   int block_y = max(1, min(MAX_BLOCK_SIZE/block_x, h_last_pow2(batch_size)/4));
   const dim3 block(block_x, block_y);
   int grid_z = max(1, min(65535, h_last_pow2(space_size)/4/block_x));
@@ -1061,7 +1030,7 @@ std::vector<at::Tensor> reduce_bn_CUDA(
 
   auto space_size = get_tensor_spatial_size(input);
 
-  int block_y = min(h_last_pow2(batch_size), int(MAX_BLOCK_SIZE/ WARP_SIZE));
+  int block_y = min(h_last_pow2(batch_size), int(MAX_BLOCK_SIZE/ 32));
   int block_x = max(1, min(MAX_BLOCK_SIZE/ block_y, h_last_pow2(space_size)));
   const dim3 block(block_x, block_y);
   const dim3 grid(feature_size);
@@ -1128,7 +1097,7 @@ at::Tensor batchnorm_backward_CUDA(
 
   auto space_size = get_tensor_spatial_size(input);
 
-  int block_x = max(WARP_SIZE, min(MAX_BLOCK_SIZE, h_last_pow2(space_size)/4));
+  int block_x = max(32, min(MAX_BLOCK_SIZE, h_last_pow2(space_size)/4));
   int block_y = max(1, min(MAX_BLOCK_SIZE/block_x, h_last_pow2(batch_size)/4));
   const dim3 block(block_x, block_y);
   int grid_z = max(1, min(65535, h_last_pow2(space_size)/4/block_x));
@@ -1195,10 +1164,6 @@ std::vector<at::Tensor> welford_parallel_CUDA(const at::Tensor mean_feature_node
   at::Tensor inv_std = at::empty_like(out_var);
   at::Tensor out_mean = at::empty_like(out_var);
 
-  at::Tensor mean_feature_nodes_ = mean_feature_nodes.contiguous();
-  at::Tensor var_biased_ = var_biased.contiguous();
-  at::Tensor numel_ = numel.contiguous();
-
   // TODO(jie): tile this for memory coalescing!
   const int block = std::min(h_last_pow2(feature_size), MAX_BLOCK_SIZE);
   const int grid = std::max<int>(1, feature_size / block);
@@ -1209,9 +1174,9 @@ std::vector<at::Tensor> welford_parallel_CUDA(const at::Tensor mean_feature_node
     using namespace at;
     DISPATCH_FLOAT_AND_HALF(mean_feature_nodes.scalar_type(), 0, "welford_parallel_kernel",
       welford_kernel_parallel<scalar_t_0><<<grid, block, 0, stream>>>(
-          mean_feature_nodes_.DATA_PTR<scalar_t_0>(),
-          var_biased_.DATA_PTR<scalar_t_0>(),
-          numel_.DATA_PTR<int>(),
+          mean_feature_nodes.DATA_PTR<scalar_t_0>(),
+          var_biased.DATA_PTR<scalar_t_0>(),
+          numel.DATA_PTR<int>(),
           out_mean.DATA_PTR<scalar_t_0>(),
           out_var.DATA_PTR<scalar_t_0>(),
           inv_std.DATA_PTR<scalar_t_0>(),

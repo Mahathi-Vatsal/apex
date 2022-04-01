@@ -5,7 +5,7 @@ import torch
 from torch.optim import Optimizer
 import apex
 from apex.multi_tensor_apply import multi_tensor_applier
-from itertools import product
+from apex.testing.common_utils import skipIfRocm
 
 class RefLAMB(Optimizer):
     r"""Implements Lamb algorithm.
@@ -41,7 +41,7 @@ class RefLAMB(Optimizer):
             import amp_C
             self.multi_tensor_l2norm=amp_C.multi_tensor_l2norm
             # Skip buffer
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=self.param_groups[0]["params"][0].device)
+            self._dummy_overflow_buf = torch.cuda.IntTensor([0])
             self.multi_tensor_lamb = amp_C.multi_tensor_lamb
         else:
             raise RuntimeError('apex.optimizers.FusedLAMB requires cuda extensions')
@@ -69,8 +69,7 @@ class RefLAMB(Optimizer):
                 else:
                     raise RuntimeError('FusedLAMB only support fp16 and fp32.')
 
-        device = self.param_groups[0]["params"][0].device
-        g_norm_32, g_norm_16 = torch.zeros(1, device=device), torch.zeros(1, device=device)
+        g_norm_32, g_norm_16 = torch.zeros(1, device='cuda'), torch.zeros(1, device='cuda')
         # compute grad norm for two lists
         if len(g_all_32) > 0:
             g_norm_32 = multi_tensor_applier(self.multi_tensor_l2norm,
@@ -86,7 +85,7 @@ class RefLAMB(Optimizer):
                                                 self._dummy_overflow_buf,
                                                 [[g_norm_32, g_norm_16]],
                                                 False)[0]
-
+        
         max_grad_norm = 1.0
         clipped_ratio = max_grad_norm / max(global_grad_norm, max_grad_norm)
 
@@ -95,7 +94,7 @@ class RefLAMB(Optimizer):
                 if p.grad is None:
                     continue
                 p.grad.data *= clipped_ratio
-                grad = p.grad.data
+                grad = p.grad.data 
                 if grad.is_sparse:
                     raise RuntimeError('Lamb does not support sparse gradients, consider SparseAdam instad.')
 
@@ -138,19 +137,19 @@ class RefLAMB(Optimizer):
                 state['g_norm'] = g_norm
                 state['trust_ratio'] = trust_ratio
 
-                step_size = group['lr']
+                step_size = group['lr'] 
 
                 p.data.add_(update, alpha=-step_size*trust_ratio)
 
         return loss
 
-class TestLamb(unittest.TestCase):
+
+class TestFusedLAMB(unittest.TestCase):
     def setUp(self, max_abs_diff=1e-3, max_rel_diff=1, iters=7):
         self.max_abs_diff = max_abs_diff
         self.max_rel_diff = max_rel_diff
         self.iters = iters
         torch.cuda.manual_seed(9876)
-
 
     def tearDown(self):
         pass
@@ -162,8 +161,8 @@ class TestLamb(unittest.TestCase):
             ref_param.append(torch.nn.Parameter(tensor.clone()))
             tst_param.append(torch.nn.Parameter(tensor.clone()))
 
-        ref_optim = self.ref_optim(ref_param, **lamb_option)
-        tst_optim = self.tst_optim(tst_param, use_nvlamb=True, **lamb_option)
+        ref_optim = RefLAMB(ref_param, **lamb_option)
+        tst_optim = apex.optimizers.FusedLAMB(tst_param, use_nvlamb=True, **lamb_option)
 
         return (ref_param, tst_param, ref_optim, tst_optim)
 
@@ -190,11 +189,11 @@ class TestLamb(unittest.TestCase):
 
         return max_abs_diff, max_rel_diff
 
-    def gen_single_type_test(self, param_type=torch.float, device="cuda"):
+    def gen_single_type_test(self, param_type=torch.float):
         nelem = 278011
-        tensor = torch.rand(nelem, dtype=param_type, device=device)
+        tensor = torch.rand(nelem, dtype=param_type, device='cuda')
         weight_decay = [0, 0.01]
-
+        
         for wd in weight_decay:
             lamb_option = {'lr':5e-4, 'betas':(0.9, 0.999), 'eps':1e-08, 'weight_decay':wd}
             ref_param, tst_param, ref_optim, tst_optim = \
@@ -203,21 +202,13 @@ class TestLamb(unittest.TestCase):
             for i in range(self.iters):
                 self.gen_grad(ref_param, tst_param)
                 ref_optim.step()
-                torch.cuda.synchronize()
                 tst_optim.step()
-                torch.cuda.synchronize()
                 max_abs_diff, max_rel_diff = self.get_max_diff(ref_param, tst_param)
 
                 self.assertLessEqual(max_abs_diff, self.max_abs_diff)
                 self.assertLessEqual(max_rel_diff, self.max_rel_diff)
 
-class TestFusedLAMB(TestLamb):
-    def __init__(self, *args, **kwargs):
-        super(TestLamb, self).__init__(*args, **kwargs)
-        self.ref_optim = RefLAMB
-        self.tst_optim = apex.optimizers.FusedLAMB
-
-
+    @skipIfRocm
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
 
@@ -225,17 +216,11 @@ class TestFusedLAMB(TestLamb):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
-
+    @skipIfRocm
     def test_multi_params(self):
         sizes = [[4096, 1024], [4096], [4096, 2048], [32320, 1024], [1]]
         weight_decay = [0, 0.01]
-
+        
         for wd in weight_decay:
             lamb_option = {'lr':5e-4, 'betas':(0.9, 0.999), 'eps':1e-08, 'weight_decay':wd}
             tensors = []
@@ -252,11 +237,12 @@ class TestFusedLAMB(TestLamb):
                 self.assertLessEqual(max_abs_diff, self.max_abs_diff)
                 self.assertLessEqual(max_rel_diff, self.max_rel_diff)
 
+    @skipIfRocm
     def test_lamb_option(self):
         nelem = 1
         tensor = torch.rand(nelem, dtype=torch.float, device='cuda')
         weight_decay = [0, 0.01]
-
+        
         for wd in weight_decay:
             lamb_option = {'lr':0.01, 'betas':(0.6, 0.9), 'eps':3e-06, 'weight_decay':wd}
             ref_param, tst_param, ref_optim, tst_optim = \
@@ -271,65 +257,6 @@ class TestFusedLAMB(TestLamb):
                 self.assertLessEqual(max_abs_diff, self.max_abs_diff)
                 self.assertLessEqual(max_rel_diff, self.max_rel_diff)
 
-class TestFusedMixedPrecisionLamb(TestLamb):
-    def __init__(self, *args, **kwargs):
-        super(TestLamb, self).__init__(*args, **kwargs)
-        self.ref_optim = RefLAMB
-        self.tst_optim = apex.optimizers.FusedMixedPrecisionLamb
-
-
-    def test_float(self):
-        self.gen_single_type_test(param_type=torch.float)
-
-    @unittest.skip("PyTorch optimizer is not numerically correct for fp16")
-    def test_half(self):
-        self.gen_single_type_test(param_type=torch.float16)
-
-    @unittest.skipIf(torch.cuda.device_count()<2, "more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
-
-    def test_multi_params(self):
-        sizes = [[4096, 1024], [4096], [4096, 2048], [32320, 1024], [1]]
-        weight_decay = [0, 0.01]
-
-        for wd in weight_decay:
-            lamb_option = {'lr':5e-4, 'betas':(0.9, 0.999), 'eps':1e-08, 'weight_decay':wd}
-            tensors = []
-            for size in sizes:
-                tensors.append(torch.rand(size, dtype=torch.float, device='cuda'))
-            ref_param, tst_param, ref_optim, tst_optim = \
-                self.gen_param_optim(tensors, lamb_option)
-
-            for i in range(self.iters):
-                self.gen_grad(ref_param, tst_param)
-                ref_optim.step()
-                tst_optim.step()
-                max_abs_diff, max_rel_diff = self.get_max_diff(ref_param, tst_param)
-                self.assertLessEqual(max_abs_diff, self.max_abs_diff)
-                self.assertLessEqual(max_rel_diff, self.max_rel_diff)
-
-    def test_lamb_option(self):
-        nelem = 1
-        tensor = torch.rand(nelem, dtype=torch.float, device='cuda')
-        weight_decay = [0, 0.01]
-
-        for wd in weight_decay:
-            lamb_option = {'lr':0.01, 'betas':(0.6, 0.9), 'eps':3e-06, 'weight_decay':wd}
-            ref_param, tst_param, ref_optim, tst_optim = \
-                self.gen_param_optim([tensor], lamb_option)
-
-            for i in range(self.iters):
-                self.gen_grad(ref_param, tst_param)
-                ref_optim.step()
-                tst_optim.step()
-                max_abs_diff, max_rel_diff = self.get_max_diff(ref_param, tst_param)
-
-                self.assertLessEqual(max_abs_diff, self.max_abs_diff)
-                self.assertLessEqual(max_rel_diff, self.max_rel_diff)
 
 if __name__ == '__main__':
     script_path = os.path.dirname(os.path.realpath(__file__))

@@ -206,8 +206,7 @@ class EncdecAttnFunc(torch.autograd.Function):
         dropout_grads = torch._masked_scale(matmul2_dgrad1, dropout_mask, 1.0/(1.0-dropout_prob_t[0]))
 
         # Softmax Grad (not a publically documented op)
-        ### softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results) # og
-        softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, torch.float32, grad_input=softmax_results)
+        softmax_grads = torch._softmax_backward_data(dropout_grads, softmax_results, -1, softmax_results)
 
         # Matmul1 - DGRAD1
         # Input1: (data grads)  [seqs*heads, seql_q, seql_k] 
@@ -264,6 +263,6 @@ class EncdecAttnFunc(torch.autograd.Function):
                input_q_grads, input_kv_grads,                                     \
                input_weight_q_grads, input_weight_kv_grads, output_weight_grads,  \
                input_bias_grads_q, input_bias_grads_kv, output_bias_grads,        \
-               None, None, None
+               None, None
 
 encdec_attn_func = EncdecAttnFunc.apply

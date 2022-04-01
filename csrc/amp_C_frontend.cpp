@@ -33,19 +33,6 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
   std::vector<std::vector<at::Tensor>> tensor_lists,
   at::optional<bool> per_tensor_python);
 
-std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_mp_cuda(
-  int chunk_size,
-  at::Tensor noop_flag,
-  std::vector<std::vector<at::Tensor>> tensor_lists,
-  at::optional<bool> per_tensor_python);
-
-std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_scale_cuda(
-  int chunk_size,
-  at::Tensor noop_flag,
-  std::vector<std::vector<at::Tensor>> tensor_lists,
-  float scale,
-  at::optional<bool> per_tensor_python);
-
 void multi_tensor_lamb_stage1_cuda(
     int chunk_size,
     at::Tensor noop_flag,
@@ -125,24 +112,17 @@ void multi_tensor_lamb_cuda(
   const float max_grad_norm,
   at::optional<bool> use_nvlamb_python);
 
-void multi_tensor_lamb_mp_cuda(
+void multi_tensor_larc_cuda(
   int chunk_size,
   at::Tensor noop_flag,
   std::vector<std::vector<at::Tensor>> tensor_lists,
-  at::Tensor lr,
-  const float beta1,
-  const float beta2,
+  at::Tensor grad_norms,
+  at::Tensor param_norms,
+  const float lr,
+  const float trust_coefficient,
   const float epsilon,
-  at::Tensor step,
-  const int bias_correction,
   const float weight_decay,
-  const int grad_averaging,
-  const int mode,
-  at::Tensor global_grad_norm,
-  at::Tensor max_grad_norm,
-  at::optional<bool> use_nvlamb_python,
-  at::Tensor found_inf,
-  at::Tensor inv_scale);
+  const bool clip);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
@@ -153,10 +133,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "out = a*x + b*y for a list of contiguous tensors");
   m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda,
         "Computes L2 norm for a list of contiguous tensors");
-  m.def("multi_tensor_l2norm_mp", &multi_tensor_l2norm_mp_cuda,
-        "Computes L2 norm for a list of contiguous tensors");
-  m.def("multi_tensor_l2norm_scale", &multi_tensor_l2norm_scale_cuda,
-        "Computes L2 norm for a list of contiguous tensors and does scaling");
   m.def("multi_tensor_lamb_stage1_cuda", &multi_tensor_lamb_stage1_cuda,
         "Computes update part of LAMB optimizer");
   m.def("multi_tensor_lamb_stage2_cuda", &multi_tensor_lamb_stage2_cuda,
@@ -169,6 +145,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Compute and apply gradient update to parameters for Adam optimizer");
   m.def("multi_tensor_lamb", &multi_tensor_lamb_cuda,
         "Computes and apply update for LAMB optimizer");
-  m.def("multi_tensor_lamb_mp", &multi_tensor_lamb_mp_cuda,
-        "Computes and apply update for LAMB optimizer");
+  m.def("multi_tensor_larc", &multi_tensor_larc_cuda,
+        "Computes new gradients using LARC");
 }

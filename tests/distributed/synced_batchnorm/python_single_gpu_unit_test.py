@@ -109,4 +109,3 @@ if sbn_result:
 else:
     print("*SBN single gpu failed*")
 
-assert sbn_result

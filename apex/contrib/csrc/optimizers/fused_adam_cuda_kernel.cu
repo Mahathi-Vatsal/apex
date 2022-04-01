@@ -1,15 +1,14 @@
+#include "ATen/ATen.h"
+#include "ATen/cuda/CUDAContext.h"
+#include "ATen/cuda/detail/IndexUtils.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <cmath>
-
-#include "ATen/ATen.h"
-#include "ATen/cuda/CUDAContext.h"
-#include "ATen/cuda/detail/IndexUtils.cuh"
 #include "ATen/TensorUtils.h"
 // #include "ATen/Type.h"
 #include "ATen/AccumulateType.h"
-
+#include <THC/THCGeneral.h>
 #include "multi_tensor_apply.cuh"
 
 #define BLOCK_SIZE 512
@@ -77,7 +76,7 @@ struct AdamFunctor
     __device__ __forceinline__ void operator()(
         int chunk_size,
         volatile int* noop_gmem,
-        TensorListMetadata<DEPTH>& tl,
+        TensorListMetadata<DEPTH>* tl,
         const float b1,
         const float b2,
         const float eps,
@@ -86,21 +85,21 @@ struct AdamFunctor
         adamMode_t mode,
         const float decay)
     {
-        int tensor_loc = tl.block_to_tensor[blockIdx.x];
-        int chunk_idx = tl.block_to_chunk[blockIdx.x];
-        int n = tl.sizes[tensor_loc];
+        int tensor_loc = tl->block_to_tensor[blockIdx.x];
+        int chunk_idx = tl->block_to_chunk[blockIdx.x];
+        int n = tl->sizes[tensor_loc];
 
-        T* p = (T *)tl.addresses[0][tensor_loc];
+        T* p = (T *)tl->addresses[0][tensor_loc];
         p += chunk_idx*chunk_size;
-        T* m = (T *)tl.addresses[1][tensor_loc];
+        T* m = (T *)tl->addresses[1][tensor_loc];
         m += chunk_idx*chunk_size;
-        T* v = (T *)tl.addresses[2][tensor_loc];
+        T* v = (T *)tl->addresses[2][tensor_loc];
         v += chunk_idx*chunk_size;
-        GRAD_T* g = (GRAD_T *)tl.addresses[3][tensor_loc];
+        GRAD_T* g = (GRAD_T *)tl->addresses[3][tensor_loc];
         g += chunk_idx*chunk_size;
         GRAD_T* p_copy = NULL;
         if (DEPTH == 5) {
-            p_copy = (GRAD_T *)tl.addresses[4][tensor_loc];
+            p_copy = (GRAD_T *)tl->addresses[4][tensor_loc];
             p_copy += chunk_idx*chunk_size;
         }
 
@@ -235,12 +234,12 @@ void fused_adam_cuda(
         }
         cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-        if (g.scalar_type() == at::ScalarType::Half || g.scalar_type() == at::ScalarType::BFloat16) {
+        if (g.scalar_type() == at::ScalarType::Half) {
 //all other values should be fp32 for half gradients
             AT_ASSERTM(p.scalar_type() == at::ScalarType::Float, "expected parameter to be of float type");
 //dispatch is done on the gradient type
             using namespace at; // prevents "toString is undefined" errors
-            DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(g.scalar_type(), 0, "adam_cuda_kernel",
+            DISPATCH_FLOAT_AND_HALF(g.scalar_type(), 0, "adam_cuda_kernel",
                 using accscalar_t = at::acc_type<scalar_t_0, true>;
                 adam_cuda_kernel<accscalar_t, scalar_t_0><<<blocks,threadsPerBlock, 0, stream>>>(
                         p.DATA_PTR<accscalar_t>(),
@@ -276,7 +275,7 @@ void fused_adam_cuda(
                         decay);
             );
       }
-      C10_CUDA_CHECK(cudaGetLastError());
+      THCudaCheck(cudaGetLastError());
 
 }
 
@@ -309,12 +308,12 @@ void fused_adam_cuda_mt(
     size_t tl_sz = tensor_lists.size();
     AT_ASSERTM(tl_sz == 4 || tl_sz == 5, "expected tensor lists of size 4 or 5");
 
-    if (tensor_lists[3][0].scalar_type() == at::ScalarType::Half || tensor_lists[3][0].scalar_type() == at::ScalarType::BFloat16) {
+    if (tensor_lists[3][0].scalar_type() == at::ScalarType::Half) {
 //alher values should be fp32 for half gradients
         AT_ASSERTM(tensor_lists[0][0].scalar_type() == at::ScalarType::Float, "expected parameter to be of float type");
 //dich is done on the gradient type
         if (tl_sz == 5) {
-            DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(tensor_lists[3][0].scalar_type(), 0, "adam_cuda_mt_kernel",
+            DISPATCH_FLOAT_AND_HALF(tensor_lists[3][0].scalar_type(), 0, "adam_cuda_mt_kernel",
                 using accscalar_t = at::acc_type<scalar_t_0, true>;
                 multi_tensor_apply<5>(
                     BLOCK_SIZE,
@@ -331,7 +330,7 @@ void fused_adam_cuda_mt(
                     decay);
             );
         } else {
-            DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(tensor_lists[3][0].scalar_type(), 0, "adam_cuda_mt_kernel",
+            DISPATCH_FLOAT_AND_HALF(tensor_lists[3][0].scalar_type(), 0, "adam_cuda_mt_kernel",
                 using accscalar_t = at::acc_type<scalar_t_0, true>;
                 multi_tensor_apply<4>(
                     BLOCK_SIZE,
@@ -383,7 +382,7 @@ void fused_adam_cuda_mt(
             );
         }
     }
-    C10_CUDA_CHECK(cudaGetLastError());
+    THCudaCheck(cudaGetLastError());
 }
 
 template <typename FROM_T, typename TO_T> 
@@ -737,17 +736,17 @@ struct MaybeCastFunctor
     __device__ __forceinline__ void operator()(
         int chunk_size,
         volatile int* overflow_flag,
-        TensorListMetadata<DEPTH>& tl)
+        TensorListMetadata<DEPTH>* tl)
     {
         if (overflow_flag && *overflow_flag != 0) return;
 
-        int tensor_loc = tl.block_to_tensor[blockIdx.x];
-        int chunk_idx = tl.block_to_chunk[blockIdx.x];
-        int n = tl.sizes[tensor_loc];
+        int tensor_loc = tl->block_to_tensor[blockIdx.x];
+        int chunk_idx = tl->block_to_chunk[blockIdx.x];
+        int n = tl->sizes[tensor_loc];
 
-        FROM_T* p_in = (FROM_T *)tl.addresses[0][tensor_loc];
+        FROM_T* p_in = (FROM_T *)tl->addresses[0][tensor_loc];
         p_in += chunk_idx*chunk_size;
-        TO_T* p_out = (TO_T *)tl.addresses[1][tensor_loc];
+        TO_T* p_out = (TO_T *)tl->addresses[1][tensor_loc];
         p_out += chunk_idx*chunk_size;
 
         n -= chunk_idx*chunk_size;
@@ -808,7 +807,7 @@ void fused_strided_check_finite(
                     stride,
                     clear_overflow_first);
                 );
-	C10_CUDA_CHECK(cudaGetLastError());
+	THCudaCheck(cudaGetLastError());
 }
 
 void fused_reversible_adam_cuda(
@@ -847,13 +846,13 @@ void fused_reversible_adam_cuda(
       }
       cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-      if (g.scalar_type() == at::ScalarType::Half || g.scalar_type() == at::ScalarType::BFloat16) {
+      if (g.scalar_type() == at::ScalarType::Half) {
           //all other values should be fp32 for half gradients
           AT_ASSERTM(p.scalar_type() == at::ScalarType::Float, "expected parameter to be of float type");
           //dispatch is done on the gradient type
           using namespace at; // prevents "toString is undefined" errors
           if (p_copy.numel() == 0 || p_copy.scalar_type() == g.scalar_type()) {
-              DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(g.scalar_type(), 0, "adam_cuda_kernel",
+              DISPATCH_FLOAT_AND_HALF(g.scalar_type(), 0, "adam_cuda_kernel",
                       using accscalar_t = at::acc_type<scalar_t_0, true>;
                       reversible_adam_cuda_kernel<accscalar_t, scalar_t_0, scalar_t_0><<<blocks,threadsPerBlock, 0, stream>>>(
                           p.DATA_PTR<accscalar_t>(),
@@ -872,7 +871,7 @@ void fused_reversible_adam_cuda(
                       );
           } else {
               AT_ASSERTM(p_copy.scalar_type() == at::ScalarType::Byte, "expected parameter to be of byte type");
-              DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(g.scalar_type(), 0, "adam_cuda_e5m2_kernel",
+              DISPATCH_FLOAT_AND_HALF(g.scalar_type(), 0, "adam_cuda_e5m2_kernel",
                       using accscalar_t = at::acc_type<scalar_t_0, true>;
                       reversible_adam_cuda_kernel<accscalar_t, scalar_t_0, uint8_t><<<blocks,threadsPerBlock, 0, stream>>>(
                           p.DATA_PTR<accscalar_t>(),
@@ -909,7 +908,7 @@ void fused_reversible_adam_cuda(
                       decay);
                   );
       }
-      C10_CUDA_CHECK(cudaGetLastError());
+      THCudaCheck(cudaGetLastError());
 }
 
 void maybe_cast_cuda(
@@ -933,7 +932,7 @@ void maybe_cast_cuda(
                       p_in.DATA_PTR<scalar_t_0>(),
                       p_out.DATA_PTR<scalar_t_1>(),
                       tsize); ))
-      C10_CUDA_CHECK(cudaGetLastError());
+      THCudaCheck(cudaGetLastError());
 }
 
 void maybe_cast_cuda_mt(
@@ -955,7 +954,7 @@ void maybe_cast_cuda_mt(
                     overflow_flag,
                     tensor_lists,
                     MaybeCastFunctor<2, scalar_t_0, scalar_t_1>()); ))
-    C10_CUDA_CHECK(cudaGetLastError());
+    THCudaCheck(cudaGetLastError());
 }
 
 void fused_maybe_adam_undo_cuda(
@@ -992,12 +991,12 @@ void fused_maybe_adam_undo_cuda(
     }
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    if (g.scalar_type() == at::ScalarType::Half || g.scalar_type() == at::ScalarType::BFloat16) {
+    if (g.scalar_type() == at::ScalarType::Half) {
         //all other values should be fp32 for half gradients
         AT_ASSERTM(p.scalar_type() == at::ScalarType::Float, "expected parameter to be of float type");
         //dispatch is done on the gradient type
         using namespace at; // prevents "toString is undefined" errors
-        DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(g.scalar_type(), 0, "adam_cuda_kernel",
+        DISPATCH_FLOAT_AND_HALF(g.scalar_type(), 0, "adam_cuda_kernel",
                 using accscalar_t = at::acc_type<scalar_t_0, true>;
                 maybe_adam_undo_cuda_kernel<accscalar_t, scalar_t_0><<<blocks,threadsPerBlock, 0, stream>>>(
                     overflow_flag.numel() ? overflow_flag.DATA_PTR<int>() : NULL,
@@ -1033,5 +1032,5 @@ void fused_maybe_adam_undo_cuda(
                     decay);
                 );
     }
-    C10_CUDA_CHECK(cudaGetLastError());
+    THCudaCheck(cudaGetLastError());
 }

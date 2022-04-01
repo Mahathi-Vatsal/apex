@@ -1,6 +1,8 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDACachingAllocator.h>
+#include <THC/THCNumerics.cuh>
+
+#include "THC/THC.h"
 
 #include "batch_norm.h"
 
@@ -24,20 +26,23 @@ static size_t round_up_to_multiple(size_t x, int multiple) {
   return ((x + multiple - 1) / multiple) * multiple;
 }
 
+// TODO: Stop manually allocating CUDA memory; allocate an ATen byte
+// tensor instead.
 struct Workspace {
   Workspace(size_t size) : size(size), data(NULL) {
-    auto& allocator = *::c10::cuda::CUDACachingAllocator::get();
-    dataPtr = allocator.allocate(size);
-    data = dataPtr.get();
+    data = THCudaMalloc(at::globalContext().lazyInitCUDA(), size);
   }
   Workspace(const Workspace&) = delete;
   Workspace(Workspace&&) = default;
   Workspace& operator=(Workspace&&) = default;
-  ~Workspace() = default;
+  ~Workspace() {
+    if (data) {
+      THCudaFree(at::globalContext().lazyInitCUDA(), data);
+    }
+  }
 
   size_t size;
   void* data;
-  c10::DataPtr dataPtr;
 };
 
 // Return {y}
@@ -63,38 +68,34 @@ at::Tensor nhwc_bn_fwd_train(
                        const int grid_dim_x,
                        const bool coop) {
 
-  auto memory_format = x.suggest_memory_format();
-  const bool check_channels_last = x.is_contiguous(at::MemoryFormat::ChannelsLast);
   const int N = x.size(0);
-  const int H = check_channels_last ? x.size(2) : x.size(1);
-  const int W = check_channels_last ? x.size(3) : x.size(2);
-  const int C = check_channels_last ? x.size(1) : x.size(3);
+  const int H = x.size(1);
+  const int W = x.size(2);
+  const int C = x.size(3);
 
   // generating new magic number and use that for sync
   int* magic = magic_tensor.DATA_PTR<int>();
   *magic = (*magic + 1) & 0xff;
 
   // Allocate output tensor
-  at::Tensor y = check_channels_last ? at::empty({N, C, H, W}, x.options().memory_format(memory_format)) : at::empty({N, H, W, C}, x.options());
+  at::Tensor y = at::empty({N, H, W, C}, x.options());
 
   // Create wrapper
   NhwcBatchNorm *bn = new NhwcBatchNorm();
 
-  bn->setInputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W, bn_group);
-  bn->setOutputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W);
+  bn->setInputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W, bn_group);
+  bn->setOutputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W);
 
   bn->setConstants(momentum, epsilon);
 
   // set pointers within the wrapper
-  bn->setInputOutputPointers(x.contiguous(memory_format).DATA_PTR<at::Half>(),
+  bn->setInputOutputPointers(x.DATA_PTR<at::Half>(),
                              nullptr,
-                             y.contiguous(memory_format).DATA_PTR<at::Half>(),
+                             y.DATA_PTR<at::Half>(),
                              nullptr);
 
-  bn->setWeightPointers({scale.contiguous().DATA_PTR<float>(),
-                         bias.contiguous().DATA_PTR<float>()}, {nullptr, nullptr});
-  bn->setParameterPointers({running_mean.contiguous().DATA_PTR<float>(),
-                            running_inv_var.DATA_PTR<float>()});
+  bn->setWeightPointers({scale.DATA_PTR<float>(), bias.DATA_PTR<float>()}, {nullptr, nullptr});
+  bn->setParameterPointers({running_mean.DATA_PTR<float>(), running_inv_var.DATA_PTR<float>()});
 
   // deal with workspace(s)
   auto workspace_bytes = bn->numWorkspaceBytes();
@@ -115,12 +116,12 @@ at::Tensor nhwc_bn_fwd_train(
   Workspace ws(total_workspace_bytes);
 
   std::vector<void *> workspace;
-  workspace.push_back(minibatch_mean.contiguous().DATA_PTR<float>());
-  workspace.push_back(minibatch_inv_var.contiguous().DATA_PTR<float>());
+  workspace.push_back(minibatch_mean.DATA_PTR<float>());
+  workspace.push_back(minibatch_inv_var.DATA_PTR<float>());
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const int retired_cta_bytes = workspace_bytes[2];
-  void* retired_ctas = ret_cta.contiguous().DATA_PTR<uint8_t>();
+  void* retired_ctas = ret_cta.DATA_PTR<uint8_t>();
   assert(ret_cta.size(0)>=retired_cta_bytes);
   workspace.push_back(retired_ctas);
 
@@ -134,7 +135,7 @@ at::Tensor nhwc_bn_fwd_train(
   // Don't fuse in ReLU for now at least
   bn->fwd(stream, fuse_relu, my_data, pair_data, pair_data2, pair_data3, bn_group, *magic, occupancy, grid_dim_x, coop);
 
-  return y.contiguous(memory_format);
+  return y;
 }
 
 at::Tensor nhwc_bn_fwd_eval(
@@ -149,34 +150,30 @@ at::Tensor nhwc_bn_fwd_eval(
                        const float epsilon,
                        const bool fuse_relu) {
 
-  const bool check_channels_last = x.is_contiguous(at::MemoryFormat::ChannelsLast);
-  auto memory_format = x.suggest_memory_format();
   const int N = x.size(0);
-  const int H = check_channels_last ? x.size(2) : x.size(1);
-  const int W = check_channels_last ? x.size(3) : x.size(2);
-  const int C = check_channels_last ? x.size(1) : x.size(3);
+  const int H = x.size(1);
+  const int W = x.size(2);
+  const int C = x.size(3);
 
   // Allocate output tensor
-  at::Tensor y = check_channels_last ? at::empty({N, C, H, W}, x.options().memory_format(memory_format)) : at::empty({N, H, W, C}, x.options());
+  at::Tensor y = at::empty({N, H, W, C}, x.options());
 
   // Create wrapper
   NhwcBatchNorm *bn = new NhwcBatchNorm();
 
-  bn->setInputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W, bn_group);
-  bn->setOutputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W);
+  bn->setInputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W, bn_group);
+  bn->setOutputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W);
 
   bn->setConstants(momentum, epsilon);
 
   // set pointers within the wrapper
-  bn->setInputOutputPointers(x.contiguous(memory_format).DATA_PTR<at::Half>(),
+  bn->setInputOutputPointers(x.DATA_PTR<at::Half>(),
                              nullptr,
-                             y.contiguous(memory_format).DATA_PTR<at::Half>(),
+                             y.DATA_PTR<at::Half>(),
                              nullptr);
 
-  bn->setWeightPointers({scale.contiguous().DATA_PTR<float>(),
-                         bias.contiguous().DATA_PTR<float>()}, {nullptr, nullptr});
-  bn->setParameterPointers({running_mean.contiguous().DATA_PTR<float>(),
-                            running_inv_var.contiguous().DATA_PTR<float>()});
+  bn->setWeightPointers({scale.DATA_PTR<float>(), bias.DATA_PTR<float>()}, {nullptr, nullptr});
+  bn->setParameterPointers({running_mean.DATA_PTR<float>(), running_inv_var.DATA_PTR<float>()});
 
   // deal with workspace(s)
   auto workspace_bytes = bn->numWorkspaceBytes();
@@ -202,7 +199,7 @@ at::Tensor nhwc_bn_fwd_eval(
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const int retired_cta_bytes = workspace_bytes[2];
-  void* retired_ctas = ret_cta.contiguous().DATA_PTR<uint8_t>();
+  void* retired_ctas = ret_cta.DATA_PTR<uint8_t>();
   assert(ret_cta.size(0)>=retired_cta_bytes);
   workspace.push_back(retired_ctas);
 
@@ -216,7 +213,7 @@ at::Tensor nhwc_bn_fwd_eval(
   // Don't fuse in ReLU for now at least
   bn->fwdInference(stream, fuse_relu);
 
-  return y.contiguous(memory_format);
+  return y;
 
 }
 
@@ -243,12 +240,10 @@ std::vector<at::Tensor> nhwc_bn_bwd(
                        const int grid_dim_x,
                        const bool coop) {
   // shape
-  const bool check_channels_last = x.is_contiguous(at::MemoryFormat::ChannelsLast);
-  auto memory_format = x.suggest_memory_format();
   const int N = x.size(0);
-  const int H = check_channels_last ? x.size(2) : x.size(1);
-  const int W = check_channels_last ? x.size(3) : x.size(2);
-  const int C = check_channels_last ? x.size(1) : x.size(3);
+  const int H = x.size(1);
+  const int W = x.size(2);
+  const int C = x.size(3);
 
   // generating new magic number and use that for sync
   int* magic = magic_tensor.DATA_PTR<int>();
@@ -258,30 +253,26 @@ std::vector<at::Tensor> nhwc_bn_bwd(
   at::Tensor x_grad, scale_grad, bias_grad;
 
   // Allocate outputs
-  x_grad = check_channels_last ? at::empty({N, C, H, W}, dy.options().memory_format(memory_format)) : at::empty_like(x);
+  x_grad = at::empty_like(x);
   scale_grad = at::empty_like(scale);
   bias_grad = at::empty_like(bias);
 
   // Create wrapper
   NhwcBatchNorm *bn = new NhwcBatchNorm();
 
-  bn->setInputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W, bn_group);
-  bn->setOutputDescriptor(DNN_TENSOR_FORMAT, DNN_DATA_HALF, N, C, H, W);
+  bn->setInputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W, bn_group);
+  bn->setOutputDescriptor(CUDNN_TENSOR_NHWC, CUDNN_DATA_HALF, N, C, H, W);
 
   bn->setConstants(momentum, epsilon);
 
   // set pointers within the wrapper
-  bn->setInputOutputPointers(x.contiguous(memory_format).DATA_PTR<at::Half>(),
-                             x_grad.contiguous(memory_format).DATA_PTR<at::Half>(),
+  bn->setInputOutputPointers(x.DATA_PTR<at::Half>(),
+                             x_grad.DATA_PTR<at::Half>(),
                              nullptr,
-                             dy.contiguous(memory_format).DATA_PTR<at::Half>());
+                             dy.DATA_PTR<at::Half>());
 
-  bn->setWeightPointers({scale.contiguous().DATA_PTR<float>(),
-                         bias.contiguous().DATA_PTR<float>()},
-                        {scale_grad.DATA_PTR<float>(),
-                         bias_grad.DATA_PTR<float>()});
-  bn->setParameterPointers({running_mean.contiguous().DATA_PTR<float>(),
-                            running_inv_var.contiguous().DATA_PTR<float>()});
+  bn->setWeightPointers({scale.DATA_PTR<float>(), bias.DATA_PTR<float>()}, {scale_grad.DATA_PTR<float>(), bias_grad.DATA_PTR<float>()});
+  bn->setParameterPointers({running_mean.DATA_PTR<float>(), running_inv_var.DATA_PTR<float>()});
 
   // deal with workspace(s)
   auto workspace_bytes = bn->numWorkspaceBytes();
@@ -302,12 +293,12 @@ std::vector<at::Tensor> nhwc_bn_bwd(
   Workspace ws(total_workspace_bytes);
 
   std::vector<void *> workspace;
-  workspace.push_back(minibatch_mean.contiguous().DATA_PTR<float>());
-  workspace.push_back(minibatch_inv_var.contiguous().DATA_PTR<float>());
+  workspace.push_back(minibatch_mean.DATA_PTR<float>());
+  workspace.push_back(minibatch_inv_var.DATA_PTR<float>());
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const int retired_cta_bytes = workspace_bytes[2];
-  void* retired_ctas = ret_cta.contiguous().DATA_PTR<uint8_t>();
+  void* retired_ctas = ret_cta.DATA_PTR<uint8_t>();
   assert(ret_cta.size(0)>=retired_cta_bytes);
   workspace.push_back(retired_ctas);
 
@@ -320,7 +311,7 @@ std::vector<at::Tensor> nhwc_bn_bwd(
 
   bn->dgrad(stream, fuse_relu, my_data, pair_data, pair_data2, pair_data3, bn_group, *magic, occupancy, grid_dim_x, coop);
 
-  return std::vector<at::Tensor>{x_grad.contiguous(memory_format), scale_grad, bias_grad};
+  return std::vector<at::Tensor>{x_grad, scale_grad, bias_grad};
 }
 
 int nhwc_bn_fwd_occupancy() {

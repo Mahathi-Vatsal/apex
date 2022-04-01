@@ -76,6 +76,10 @@
 #include <ATen/AccumulateType.h>
 #include <ATen/cuda/NumericLimits.cuh>
 
+#include <THC/THC.h>
+#include <THC/THCGeneral.h>
+#include <THC/THCThrustAllocator.cuh>
+
 #include "type_shim.h"
 #include "compat.h"
 
@@ -582,7 +586,7 @@ std::vector<Tensor> host_softmax_xentropy(
         const Tensor & labels_,
         const float smoothing,
         const bool half_to_float){
-  if (half_to_float) AT_ASSERTM(input_.type().scalarType() == ScalarType::Half || input_.type().scalarType() == ScalarType::BFloat16,"conversion is supported for Half and BFloat16 type only");
+  if (half_to_float) AT_ASSERTM(input_.type().scalarType() == ScalarType::Half,"conversion is supported for Half type only");
   AT_ASSERTM(labels_.type().scalarType() == ScalarType::Long,"Label type should be CUDA Long");
 
   auto input = input_.contiguous();
@@ -613,7 +617,7 @@ std::vector<Tensor> host_softmax_xentropy(
   dim3 grid(outer_size);
 
   using namespace at;
-  DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(input.scalar_type(), 0, "host_softmax_xentropy",
+  DISPATCH_FLOAT_AND_HALF(input.scalar_type(), 0, "host_softmax_xentropy",
     using accscalar_t = at::acc_type<scalar_t_0, true>;
     const int ILP = sizeof(float4)/sizeof(scalar_t_0);
     dim3 block = SoftMax_getBlockSize(ILP, dim_size);
@@ -634,7 +638,7 @@ std::vector<Tensor> host_softmax_xentropy(
     }
   );
 
-  C10_CUDA_CHECK(cudaGetLastError());
+  THCudaCheck(cudaGetLastError());
 
   std::vector<at::Tensor> ret = {losses, max_log_sum_exp};
   return ret;
@@ -681,7 +685,7 @@ Tensor host_softmax_xentropy_backward(
 
   dim3 grid(outer_size);
 
-  DISPATCH_FLOAT_AND_HALF_AND_BFLOAT16(gI.scalar_type(), 0, "host_softmax_xentropy_backward",
+  DISPATCH_FLOAT_AND_HALF(gI.scalar_type(), 0, "host_softmax_xentropy_backward",
     using accscalar_t = acc_type<scalar_t_0, true>;
     const int ILP = sizeof(float4)/sizeof(scalar_t_0);
     dim3 block = SoftMax_getBlockSize(ILP, dim_size);
@@ -704,7 +708,7 @@ Tensor host_softmax_xentropy_backward(
     }
   );
 
-  C10_CUDA_CHECK(cudaGetLastError());
+  THCudaCheck(cudaGetLastError());
   return gI;
 }
 
@@ -720,7 +724,7 @@ at::Tensor softmax_xentropy_backward_cuda(
     const float smoothing) {
   bool half_to_float = grad_loss.type().scalarType() != logits.type().scalarType();
   if (half_to_float) {
-     AT_ASSERTM((grad_loss.type().scalarType() == ScalarType::Float && (logits.type().scalarType() == ScalarType::Half || logits.type().scalarType() == ScalarType::BFloat16)), "expected input and grad types to match, or input to be at::Half or at::Bfloat16 and grad to be at::Float");
+     AT_ASSERTM((grad_loss.type().scalarType() == ScalarType::Float && logits.type().scalarType() == ScalarType::Half), "expected input and grad types to match, or input to be at::Half and grad to be at::Float");
   }
   return host_softmax_xentropy_backward<LogSoftMaxBackwardEpilogue>(grad_loss, logits, max_log_sum_exp, labels, smoothing, half_to_float);
 }

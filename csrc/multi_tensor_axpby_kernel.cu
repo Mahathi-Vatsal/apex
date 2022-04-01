@@ -15,7 +15,11 @@
 
 template<typename T>
 __device__ __forceinline__ bool is_aligned(T* p){
+#ifdef __HIP_PLATFORM_HCC__
+  return false;
+#else
   return ((uint64_t)p) % (ILP*sizeof(T)) == 0;
+#endif
 }
 
 template<typename T>
@@ -30,7 +34,7 @@ struct AxpbyFunctor
    __device__ __forceinline__ void operator()(
     int chunk_size,
     volatile int* noop_gmem,
-    TensorListMetadata<3>& tl,
+    TensorListMetadata<3>* tl,
     float a,
     float b,
     int arg_to_check)
@@ -39,17 +43,17 @@ struct AxpbyFunctor
     // if(*noop_gmem == 1)
     //   return;
 
-    int tensor_loc = tl.block_to_tensor[blockIdx.x];
-    int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int tensor_loc = tl->block_to_tensor[blockIdx.x];
+    int chunk_idx = tl->block_to_chunk[blockIdx.x];
+    int n = tl->sizes[tensor_loc];
 
-    x_t* x = (x_t*)tl.addresses[0][tensor_loc];
+    x_t* x = (x_t*)tl->addresses[0][tensor_loc];
     x += chunk_idx*chunk_size;
 
-    y_t* y = (y_t*)tl.addresses[1][tensor_loc];
+    y_t* y = (y_t*)tl->addresses[1][tensor_loc];
     y += chunk_idx*chunk_size;
 
-    out_t* out = (out_t*)tl.addresses[2][tensor_loc];
+    out_t* out = (out_t*)tl->addresses[2][tensor_loc];
     out += chunk_idx*chunk_size;
 
     n -= chunk_idx*chunk_size;

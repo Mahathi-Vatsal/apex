@@ -2,7 +2,6 @@
 #include <ATen/AccumulateType.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
-#include <c10/cuda/CUDAGuard.h>
 // Another possibility:
 // #include <torch/all.h>
 
@@ -16,7 +15,11 @@
 
 template<typename T>
 __device__ __forceinline__ bool is_aligned(T* p){
+#ifdef __HIP_PLATFORM_HCC__
+  return false;
+#else
   return ((uint64_t)p) % (ILP*sizeof(T)) == 0;
+#endif
 }
 
 template<typename T>
@@ -31,7 +34,7 @@ struct L2NormFunctor
   __device__ __forceinline__ void operator()(
     int chunk_size,
     volatile int* noop_gmem,
-    TensorListMetadata<1>& tl,
+    TensorListMetadata<1>* tl,
     float* output,
     float* output_per_tensor,
     bool per_tensor,
@@ -41,11 +44,11 @@ struct L2NormFunctor
     // if(*noop_gmem == 1)
     //   return;
 
-    int tensor_loc = tl.block_to_tensor[blockIdx.x];
-    int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int tensor_loc = tl->block_to_tensor[blockIdx.x];
+    int chunk_idx = tl->block_to_chunk[blockIdx.x];
+    int n = tl->sizes[tensor_loc];
 
-    x_t* x = (x_t*)tl.addresses[0][tensor_loc];
+    x_t* x = (x_t*)tl->addresses[0][tensor_loc];
     x += chunk_idx*chunk_size;
 
     n -= chunk_idx*chunk_size;
@@ -104,7 +107,7 @@ struct L2NormFunctor
         *noop_gmem = 1; // Blindly fire off a write.  These will race but that's ok.
       output[blockIdx.x] += final;
       if(per_tensor)
-        output_per_tensor[(tl.start_tensor_this_launch + tensor_loc)*max_chunks_per_tensor + chunk_idx] = final;
+        output_per_tensor[(tl->start_tensor_this_launch + tensor_loc)*max_chunks_per_tensor + chunk_idx] = final;
     }
   }
 };
@@ -116,7 +119,7 @@ struct MaxNormFunctor
   __device__ __forceinline__ void operator()(
     int chunk_size,
     volatile int* noop_gmem,
-    TensorListMetadata<1>& tl,
+    TensorListMetadata<1>* tl,
     float* output,
     float* output_per_tensor,
     bool per_tensor,
@@ -126,11 +129,11 @@ struct MaxNormFunctor
     // if(*noop_gmem == 1)
     //   return;
 
-    int tensor_loc = tl.block_to_tensor[blockIdx.x];
-    int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int tensor_loc = tl->block_to_tensor[blockIdx.x];
+    int chunk_idx = tl->block_to_chunk[blockIdx.x];
+    int n = tl->sizes[tensor_loc];
 
-    x_t* x = (x_t*)tl.addresses[0][tensor_loc];
+    x_t* x = (x_t*)tl->addresses[0][tensor_loc];
     x += chunk_idx*chunk_size;
 
     n -= chunk_idx*chunk_size;
@@ -189,7 +192,7 @@ struct MaxNormFunctor
         *noop_gmem = 1; // Blindly fire off a write.  These will race but that's ok.
       output[blockIdx.x] = fmaxf(fabsf(output[blockIdx.x]), fabsf(final));
       if(per_tensor)
-        output_per_tensor[(tl.start_tensor_this_launch + tensor_loc)*max_chunks_per_tensor + chunk_idx] = final;
+        output_per_tensor[(tl->start_tensor_this_launch + tensor_loc)*max_chunks_per_tensor + chunk_idx] = final;
     }
   }
 };
@@ -344,13 +347,13 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
       max_chunks_per_tensor);)
 
   AT_CUDA_CHECK(cudaGetLastError());
+
   // AT_CUDA_CHECK(cudaDeviceSynchronize());
 
   // This involves one more small kernel launches, but will be negligible end to end.
   // I could get rid of these by hacking the functor + multi tensor harness with persistence
   // logic, but keeping it simple for now
   auto ret = at::empty({1}, output.options());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
   auto stream = at::cuda::getCurrentCUDAStream();
   cleanup<<<per_tensor ? ntensors : 1, 512, 0, stream>>>(
     output.DATA_PTR<float>(),
@@ -378,7 +381,7 @@ void multi_tensor_norm_out_cuda(
   const int norm_type)
 {
   auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
-  TORCH_CHECK(tensor_lists[0][0].device() == noop_flag.device(), "noop flag should be on the same device as tensors");
+
   // we don't need global thus uses empty here
   auto output = at::empty({320}, float_options);
 
@@ -435,11 +438,6 @@ void multi_tensor_norm_out_cuda(
   // I could get rid of these by hacking the functor + multi tensor harness with persistence
   // logic, but keeping it simple for now
   auto ret = at::empty({1}, output.options());
-
-  // Adding the following device guard since it happens sometimes that the 
-  // tensors are on one device and the cuda stream is on another device which  
-  // results in ILLEGAL MEM ACCESS error. 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
   auto stream = at::cuda::getCurrentCUDAStream();
   cleanup_v2<<<ntensors, 512, 0, stream>>>(
     output.DATA_PTR<float>(),

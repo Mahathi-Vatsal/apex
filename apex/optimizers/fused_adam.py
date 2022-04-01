@@ -13,8 +13,7 @@ class FusedAdam(torch.optim.Optimizer):
       * Fusion of the Adam update's elementwise operations
       * A multi-tensor apply launch that batches the elementwise updates applied to all the model's parameters into one or a few kernel launches.
 
-    :class:`apex.optimizers.FusedAdam` may be used as a drop-in replacement for ``torch.optim.AdamW``,
-    or ``torch.optim.Adam`` with ``adam_w_mode=False``::
+    :class:`apex.optimizers.FusedAdam` may be used as a drop-in replacement for ``torch.optim.Adam``::
 
         opt = apex.optimizers.FusedAdam(model.parameters(), lr = ....)
         ...

@@ -79,9 +79,7 @@ class FusedNovoGrad(torch.optim.Optimizer):
         if multi_tensor_applier.available:
             import amp_C
             # Skip buffer
-
-            # Creating the overflow buffer on the same device as the params tensors.
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=self.param_groups[0]["params"][0].device)
+            self._dummy_overflow_buf = torch.cuda.IntTensor([0])
             self.multi_tensor_novograd = amp_C.multi_tensor_novograd
         else:
             raise RuntimeError('apex.optimizers.FusedNovoGrad requires cuda extensions')
@@ -160,9 +158,8 @@ class FusedNovoGrad(torch.optim.Optimizer):
             if 'exp_avg_sq' not in group:
                 group['exp_avg_sq'] = [None, None]
                 if group['init_zero']:
-                    # Creating the following parameters on the same device as the params tensors.
-                    group['exp_avg_sq'][0] = torch.cuda.FloatTensor(len(g_16), device=self.param_groups[0]["params"][0].device).contiguous().fill_(0)
-                    group['exp_avg_sq'][1] = torch.cuda.FloatTensor(len(g_32), device=self.param_groups[0]["params"][0].device).contiguous().fill_(0)
+                    group['exp_avg_sq'][0] = torch.cuda.FloatTensor(len(g_16)).contiguous().fill_(0)
+                    group['exp_avg_sq'][1] = torch.cuda.FloatTensor(len(g_32)).contiguous().fill_(0)
                 else: # init with first step norm, so first blend have no effect
                     if group['norm_type'] == 0:
                         v_16 = [torch.max(torch.abs(g.to(torch.float32))).item() for g in g_16]
@@ -172,9 +169,8 @@ class FusedNovoGrad(torch.optim.Optimizer):
                         v_32 = [torch.sum(torch.pow(g, 2)).sqrt().item() for g in g_32]
                     else:
                         raise RuntimeError('FusedNovoGrad only support l2/inf norm now.')
-                    # Creating the following parameters on the same device as the params tensors.
-                    group['exp_avg_sq'][0] = torch.cuda.FloatTensor(v_16, device=self.param_groups[0]["params"][0].device)
-                    group['exp_avg_sq'][1] = torch.cuda.FloatTensor(v_32, device=self.param_groups[0]["params"][0].device)
+                    group['exp_avg_sq'][0] = torch.cuda.FloatTensor(v_16)
+                    group['exp_avg_sq'][1] = torch.cuda.FloatTensor(v_32)
             else:
                 assert(len(g_16) == group['exp_avg_sq'][0].numel())
                 assert(len(g_32) == group['exp_avg_sq'][1].numel())

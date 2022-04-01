@@ -119,7 +119,6 @@ See the [Docker example folder](https://github.com/NVIDIA/apex/tree/master/examp
 * Python 3.6
 * Pytorch 1.5 or newer, The HIPExtensions require 1.5 or newer.
 * We recommend follow the instructions from [ROCm-Pytorch](https://github.com/ROCmSoftwarePlatform/pytorch) to install pytorch on ROCm.
-* Note: For pytorch versions < 1.8, building from source is no longer supported, please use the release package [ROCm-Apex v0.3](https://github.com/ROCmSoftwarePlatform/apex/releases/tag/v0.3) . 
 
 # Quick Start
 
@@ -129,19 +128,18 @@ Note: Pytorch version recommended is >=1.5 for extension build.
 
 ### To install using python only build use the following command in apex folder:
 ```
-python setup.py install
+python3.6 setup.py install
 ```
 
 ### To install using extensions enabled use the following command in apex folder:
 ```
-python setup.py install --cpp_ext --cuda_ext
+python3.6 setup.py install --cpp_ext --cuda_ext
 ```
-Note that using --cuda_ext flag to install Apex will also enable all the extensions supported on ROCm including "--distributed_adam", "--distributed_lamb", "--bnp", "--xentropy", "--deprecated_fused_adam", "--deprecated_fused_lamb", and "--fast_multihead_attn".
 
 ### To install Apex on ROCm using ninja and without cloning the source
 ```
-pip install ninja
-pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
+pip3.6 install ninja
+pip3.6 install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
 ```
 
 ### Linux
@@ -149,14 +147,14 @@ pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+h
 For performance and full functionality, we recommend installing Apex with
 CUDA and C++ extensions via
 ```
-git clone https://github.com/NVIDIA/apex
-cd apex
-pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+$ git clone https://github.com/NVIDIA/apex
+$ cd apex
+$ pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
 ```
 
 Apex also supports a Python-only build (required with Pytorch 0.4) via
 ```
-pip install -v --disable-pip-version-check --no-cache-dir ./
+$ pip install -v --no-cache-dir ./
 ```
 A Python-only build omits:
 - Fused kernels required to use `apex.optimizers.FusedAdam`.

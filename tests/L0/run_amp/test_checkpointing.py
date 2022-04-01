@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from apex import amp
+from apex.testing.common_utils import skipIfRocm
 
 from utils import common_init, FLOAT
 
@@ -43,7 +44,7 @@ class TestCheckpointing(unittest.TestCase):
                              'Parameter in state_dict not FLOAT')
 
     def train_step(self, model, optimizer, data, loss_ids):
-        optimizer.zero_grad()
+        optimizer.zero_grad()        
 
         output = model(data)
 
@@ -69,7 +70,6 @@ class TestCheckpointing(unittest.TestCase):
                     'key: {}\nparam: {}\nrestored: {}\ndiff: {} for {}'.format(
                         key, paramA, paramB, paramA - paramB, test_setup))
 
-    @unittest.skip("The failing unit test is introduced by a PyTorch commit sometime in between rocm/pytorch:rocm4.3.1_ubuntu18.04_py3.6_pytorch_1.9.0 and 2021/12/01. Same error is also observed on CUDA. Please refer to https://github.com/ROCmSoftwarePlatform/apex/issues/62")
     def test_restoring(self):
         nb_epochs = 10
         nb_epochs_restore = nb_epochs // 2
@@ -102,12 +102,12 @@ class TestCheckpointing(unittest.TestCase):
                         if opt_level == res_opt_level:
                             # train for nb_epochs and restore after nb_epochs_restore
                             for epoch in range(nb_epochs):
-
+    
                                 x = torch.randn(16, 3, 24, 24, device='cuda')
                                 output = self.train_step(
                                     model, optimizer, x, range(num_losses))
                                 # Initialize model one step before comparing.
-                                # Otherwise the batchnorm layers will be updated
+                                # Otherwise the batchnorm layers will be updated 
                                 # additionally in restore_model
                                 if epoch == (nb_epochs_restore - 1):
                                     # Load model and optimizer
@@ -161,6 +161,7 @@ class TestCheckpointing(unittest.TestCase):
                             # skip tests for different opt_levels
                             continue
 
+    @skipIfRocm
     def test_loss_scale_decrease(self):
         num_losses = 3
         nb_decrease_loss_scales = [0, 1, 2]
@@ -170,10 +171,10 @@ class TestCheckpointing(unittest.TestCase):
             nb_decrease_loss_scales_tmp = list(nb_decrease_loss_scales)
 
             model = MyModel().to('cuda')
-
+        
             optimizer = optim.SGD(model.parameters(),
                                   lr=self.initial_lr)
-
+        
             model, optimizer = amp.initialize(
                 model, optimizer, opt_level=opt_level, num_losses=num_losses,
                 verbosity=0)
@@ -181,26 +182,26 @@ class TestCheckpointing(unittest.TestCase):
             if amp._amp_state.opt_properties.loss_scale != 'dynamic':
                 #print('Static loss scale set. Skipping opt_level.')
                 continue
-
+        
             # force to skip some updates to decrease the loss_scale
             initial_loss_scales = []
             for idx in range(num_losses):
                 initial_loss_scales.append(
                     amp._amp_state.loss_scalers[idx].loss_scale())
-
+            
             for _ in range(len(nb_decrease_loss_scales)):
                 x = torch.randn(16, 3, 24, 24, device='cuda')
                 for idx in range(num_losses):
                     while nb_decrease_loss_scales_tmp[idx] > 0:
                         optimizer.zero_grad()
                         output = model(x * 2**17)
-                        loss = output.mean()
-
+                        loss = output.mean()            
+                    
                         with amp.scale_loss(loss, optimizer, loss_id=idx) as scaled_loss:
                             scaled_loss.backward(retain_graph=True)
                         optimizer.step()
                         nb_decrease_loss_scales_tmp[idx] -= 1
-
+                
             # Check loss scales afterwards
             updated_loss_scales = []
             for idx in range(num_losses):
@@ -221,7 +222,6 @@ class TestCheckpointing(unittest.TestCase):
                 unskipped_target = 0
                 self.assertEqual(scaler['unskipped'], unskipped_target)
 
-    @unittest.skip("The failing unit test is introduced by a PyTorch commit sometime in between rocm/pytorch:rocm4.3.1_ubuntu18.04_py3.6_pytorch_1.9.0 and 2021/12/01. Same error is also observed on CUDA. Please refer to https://github.com/ROCmSoftwarePlatform/apex/issues/62")
     def test_state_dict(self):
         for opt_level in self.test_opt_levels:
             # Skip O3
@@ -243,7 +243,7 @@ class TestCheckpointing(unittest.TestCase):
             # Create dummy data
             data = torch.randn(10, 3, 4, 4, device='cuda')
             target = torch.randn(10, 6, 4, 4, device='cuda')
-
+            
             # Get initnial loss
             optimizer.zero_grad()
             output = model(data)
@@ -266,4 +266,4 @@ class TestCheckpointing(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
-
+        

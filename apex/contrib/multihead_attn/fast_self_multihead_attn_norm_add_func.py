@@ -9,6 +9,7 @@ class FastSelfAttnNormAddFunc(torch.autograd.Function):
         dropout_prob_t = torch.tensor([dropout_prob])
         null_tensor    = torch.tensor([])
         use_mask       = (pad_mask is not None)
+
         lyr_nrm_results,                                                \
         lyr_nrm_mean,                                                   \
         lyr_nrm_invvar,                                                 \
