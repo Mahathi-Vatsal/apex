@@ -219,7 +219,8 @@ class FusedSGD(Optimizer):
                         nesterov,
                         first_run,
                         self.wd_after_momentum,
-                        1.0/self.most_recent_scale)
+                        1.0/self.most_recent_scale,
+                        group['is_skipped'])
 
         self.most_recent_scale = 1.0
         self.scale_set_by_backward = False
