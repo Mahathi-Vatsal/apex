@@ -59,11 +59,12 @@ struct LARCFunctor
       for (int i = i_start + threadIdx.x;
           i < i_start + threadIdx.x + ILP * blockDim.x && i < n;
           i += blockDim.x) {
-        g[i] = ((g[i] * trust_ratio) + (weight_decay * p[i])) * adaptive_lr;
+	//FIXME
+        g[i] = (g[i] + (weight_decay * p[i])) * trust_ratio;
       }
     }
-  //}
- #if 0
+    //}
+#if 0
     else {
       // Avoid reading p when weight decay = 0.0f
       for (int i_start = 0; i_start < n; i_start += blockDim.x * ILP) {
@@ -75,7 +76,7 @@ struct LARCFunctor
         }
       }
     }
- #endif
+#endif
   }
 };
 

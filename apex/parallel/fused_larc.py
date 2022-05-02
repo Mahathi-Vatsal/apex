@@ -54,7 +54,6 @@ class FusedLARC(object):
         with torch.no_grad():
             weight_decays = []
             lrs = []
-            skipped = []
             for group in self.optim.param_groups:
                 # absorb weight decay control from optimizer
                 weight_decay = group['weight_decay'] if 'weight_decay' in group else 0
@@ -64,9 +63,6 @@ class FusedLARC(object):
                 lr = group['lr']
                 lrs.append(lr)
                 group['lr'] = lr
-
-                is_skipped = group['is_skipped']
-                skipped.append(is_skipped)
 
                 fused_larc_params = []
                 fused_larc_grads = []
@@ -96,11 +92,10 @@ class FusedLARC(object):
                         self.trust_coefficient,
                         self.eps,
                         weight_decay,
-                        is_skipped)
+                        group['is_skipped'])
 
         self.optim.step()
         # return weight decay control to optimizer
         for i, group in enumerate(self.optim.param_groups):
             group['weight_decay'] = weight_decays[i]
             group['lr'] = lrs[i]
-            group['is_skipped'] = skipped[i]

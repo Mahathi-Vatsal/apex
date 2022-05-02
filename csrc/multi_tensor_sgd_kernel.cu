@@ -40,8 +40,7 @@ struct SGDFunctor
     bool nesterov,
     bool first_run,
     bool wd_after_momentum,
-    float scale,
-    const bool is_skipped)
+    float scale)
   {
     // Early exit if we don't need to do anything
     if (*noop_gmem) return;
@@ -150,8 +149,7 @@ void multi_tensor_sgd_cuda(
   bool nesterov,
   bool first_run,
   bool wd_after_momentum,
-  float scale,
-  const bool is_skipped)
+  float scale)
 {
   auto num_tensors = tensor_lists.size();
   auto grad_type = tensor_lists[0][0].scalar_type();
@@ -194,8 +192,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   // Case 2. fp16, fp32, fp32, No
   // else if (grad_type == at::ScalarType::Half &&
@@ -233,8 +230,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   // Case 3. fp16, fp32, fp32, Yes
   else if(grad_type == at::ScalarType::Half &&
@@ -254,8 +250,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   // Case 4. fp32, fp32, fp32, Yes
   else if(grad_type == at::ScalarType::Float &&
@@ -275,8 +270,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   // Case 5. bfp16, bfp16, bfp16, No
   else if(grad_type == at::ScalarType::BFloat16 &&
@@ -296,8 +290,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   // Case 6. bfp16, fp32, fp32, Yes
   else if(grad_type == at::ScalarType::BFloat16 &&
@@ -317,8 +310,7 @@ void multi_tensor_sgd_cuda(
         nesterov,
         first_run,
         wd_after_momentum,
-        scale,
-	is_skipped);
+        scale);
   }
   else
   {

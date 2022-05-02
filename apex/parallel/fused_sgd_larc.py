@@ -1,9 +1,10 @@
 import torch
 from torch.optim.optimizer import Optimizer, required
-
+from torch import nn
+from torch.nn.parameter import Parameter
 from apex.multi_tensor_apply import multi_tensor_applier
 
-class FusedSGD(Optimizer):
+class Fused_SGD_LARC(Optimizer):
     r"""Implements stochastic gradient descent (optionally with momentum).
 
     Currently GPU-only.  Requires Apex to be installed via
@@ -74,10 +75,10 @@ class FusedSGD(Optimizer):
     """
 
     def __init__(self, params, lr=required, momentum=0, dampening=0,
-                 weight_decay=0, nesterov=False,
-                 wd_after_momentum=False,
-                 materialize_master_grads=True,
-                 set_grad_none=False):
+                 weight_decay=0, trust_coefficient=0.001, clip=True, eps=0.0,
+                 nesterov=False, wd_after_momentum=False,
+                 materialize_master_grads=True, set_grad_none=False):
+
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if momentum < 0.0:
@@ -89,24 +90,30 @@ class FusedSGD(Optimizer):
                         weight_decay=weight_decay, nesterov=nesterov)
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
-        super(FusedSGD, self).__init__(params, defaults)
+        super(Fused_SGD_LARC, self).__init__(params, defaults)
 
         self.wd_after_momentum = wd_after_momentum
         self.materialize_master_grads = materialize_master_grads
         self.most_recent_scale = 1.0
         self.scale_set_by_backward = False
         self.set_grad_none = set_grad_none
+        self.trust_coefficient = trust_coefficient
+        self.eps = eps
+        self.clip = clip
 
         if multi_tensor_applier.available:
             import amp_C
             # Skip buffer
             self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=self.param_groups[0]["params"][0].device)
             self.multi_tensor_sgd = amp_C.multi_tensor_sgd
+            self.multi_tensor_l2norm = amp_C.multi_tensor_l2norm
+            self.multi_tensor_larc = amp_C.multi_tensor_larc
+            self._dummy_overflow_buf = torch.cuda.IntTensor(1).zero_()
         else:
-            raise RuntimeError('apex.optimizers.FusedSGD requires cuda extensions')
+            raise RuntimeError('apex.optimizers.Fused_SGD_LARC requires cuda extensions')
 
     def __setstate__(self, state):
-        super(FusedSGD, self).__setstate__(state)
+        super(Fused_SGD_LARC, self).__setstate__(state)
         for group in self.param_groups:
             group.setdefault('nesterov', False)
 
@@ -116,7 +123,7 @@ class FusedSGD(Optimizer):
                 for p in group['params']:
                     p.grad = None
         else:
-            super(FusedSGD, self).zero_grad()
+            super(Fused_SGD_LARC, self).zero_grad()
 
     def get_momentums(self, params):
         momentums = []
@@ -135,6 +142,60 @@ class FusedSGD(Optimizer):
                 momentums.append(param_state['momentum_buffer'])
         return momentums, first_run
 
+    def larc_step(self):
+        with torch.no_grad():
+            weight_decays = []
+            lrs = []
+            skipped = []
+            for group in self.param_groups:
+                # absorb weight decay control from optimizer
+                weight_decay = group['weight_decay'] if 'weight_decay' in group else 0
+                weight_decays.append(weight_decay)
+                group['weight_decay'] = 0
+
+                lr = group['lr']
+                lrs.append(lr)
+                group['lr'] = lr
+
+                is_skipped = group['is_skipped']
+                skipped.append(is_skipped)
+
+                fused_larc_params = []
+                fused_larc_grads = []
+                for p in group['params']:
+                    if p.grad is None:
+                        continue
+                    fused_larc_grads.append(p.grad.data)
+                    fused_larc_params.append(p.data)
+
+                n = len(fused_larc_grads)
+
+                # Compute L2 norms
+                norms = multi_tensor_applier(
+                        self.multi_tensor_l2norm,
+                        self._dummy_overflow_buf,
+                        [fused_larc_grads + fused_larc_params],
+                        True)[1]
+
+                # Compute new grads
+                multi_tensor_applier(
+                        self.multi_tensor_larc,
+                        self._dummy_overflow_buf,
+                        [fused_larc_grads, fused_larc_params],
+                        norms[:n],
+                        norms[n:],
+                        lr,
+                        self.trust_coefficient,
+                        self.eps,
+                        weight_decay,
+                        is_skipped)
+
+        # return weight decay control to optimizer
+        for i, group in enumerate(self.param_groups):
+            group['weight_decay'] = weight_decays[i]
+            group['lr'] = lrs[i]
+            group['is_skipped'] = skipped[i]
+
     def step(self, closure=None):
         """Performs a single optimization step.
 
@@ -149,6 +210,8 @@ class FusedSGD(Optimizer):
         explicit_master_params = (hasattr(self, "_amp_stash") and
                                   hasattr(self._amp_stash, "fp32_from_fp16_groups"))
 
+        self.larc_step()
+        
         for gid, group in enumerate(self.param_groups):
             weight_decay = group['weight_decay']
             momentum = group['momentum']
